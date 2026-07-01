@@ -1,6 +1,4 @@
-import asyncio
 import json
-import logging
 import os
 import random
 from pathlib import Path
@@ -8,19 +6,19 @@ from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import InlineQuery, InlineQueryResultCachedPhoto, Message
+from aiogram.types import InlineQuery, InlineQueryResultCachedPhoto, Message, Update
+from flask import Flask, Response, request
 
 
-logging.basicConfig(level=logging.INFO)
+BASE_DIR = Path(__file__).resolve().parent
+FILE_IDS_PATH = BASE_DIR / "photo_file_ids.json"
 
-FILE_IDS_PATH = Path("photo_file_ids.json")
 
-
-def get_token() -> str:
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN is not set")
-    return token
+def get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"{name} is not set")
+    return value
 
 
 def load_photo_file_ids() -> list[str]:
@@ -38,7 +36,14 @@ def load_photo_file_ids() -> list[str]:
     return data
 
 
+BOT_TOKEN = get_required_env("BOT_TOKEN")
+WEBHOOK_SECRET = get_required_env("WEBHOOK_SECRET")
+WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
+PHOTO_FILE_IDS = load_photo_file_ids()
+
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+app = Flask(__name__)
 
 
 @dp.message(CommandStart())
@@ -51,7 +56,7 @@ async def start(message: Message) -> None:
 
 @dp.inline_query(F.query.regexp(r"^.*$"))
 async def inline_random_image(query: InlineQuery) -> None:
-    photo_file_id = random.choice(load_photo_file_ids())
+    photo_file_id = random.choice(PHOTO_FILE_IDS)
 
     result = InlineQueryResultCachedPhoto(
         id=str(uuid4()),
@@ -67,10 +72,23 @@ async def inline_random_image(query: InlineQuery) -> None:
     )
 
 
-async def main() -> None:
-    bot = Bot(token=get_token())
-    await dp.start_polling(bot)
+@app.post(WEBHOOK_PATH)
+def telegram_webhook() -> Response:
+    secret_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if secret_token != WEBHOOK_SECRET:
+        return Response(status=403)
+
+    update = Update.model_validate(request.get_json())
+    import asyncio
+
+    asyncio.run(dp.feed_update(bot, update))
+    return Response(status=200)
+
+
+@app.get("/")
+def healthcheck() -> tuple[str, int]:
+    return "ok", 200
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app.run()
